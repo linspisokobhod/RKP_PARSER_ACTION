@@ -72,7 +72,7 @@ jobs:
           EOF
 
       - name: Run parser
-        run: python RKP_Parser_Full.py
+        run: python lso.py
 
       - name: Commit and push results
         run: |
