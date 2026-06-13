@@ -48,17 +48,16 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs("lists", exist_ok=True)
 
 # ========= Настройки =========
-THREADS_DOWNLOAD = 30
-TCP_CHECK_THREADS = 50
-XRAY_CHECK_THREADS = 30
-TCP_TIMEOUT = 10
-XRAY_TIMEOUT = 12
-TEST_URLS = ["https://www.gstatic.com/generate_204"]
-LOCAL_PORT_START = 10000
+THREADS_DOWNLOAD = 100
+TCP_CHECK_THREADS = 10
+XRAY_CHECK_THREADS = 5
+TCP_TIMEOUT = 1000
+XRAY_TIMEOUT = 1000
+TEST_URLS = ["http://www.gstatic.com/generate_204"]
+LOCAL_PORT_START = 656553
 CORE_STARTUP_TIMEOUT = 1.0
 CORE_KILL_DELAY = 0.2
-MAX_WORKERS = XRAY_CHECK_THREADS
-
+MAX_WORKERS = 100
 # ========= Ядра (загрузка из вашего релиза) =========
 CORES_DIR = Path("./cores")
 CORES_DIR.mkdir(exist_ok=True)
