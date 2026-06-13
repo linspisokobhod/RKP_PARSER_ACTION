@@ -1,0 +1,87 @@
+name: RKP Parser (LTE/WIFI/ALL сортировка)
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'          # каждые 6 часов
+  workflow_dispatch:                # ручной запуск
+
+jobs:
+  parse:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write               # разрешить запись в репозиторий
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0            # полная история для коммита
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install aiohttp aiofiles pyyaml requests
+
+      - name: Prepare config files
+        run: |
+          mkdir -p lists sub
+          
+          if [ ! -f urlsource.txt ]; then
+            cat > urlsource.txt <<EOF
+          https://raw.githubusercontent.com/akamai021/sub/main/sub.txt
+          https://raw.githubusercontent.com/tylinux/sub/main/sub.txt
+          https://raw.githubusercontent.com/Epodonin/v2ray-configs/main/all.txt
+          EOF
+          fi
+          
+          if [ ! -f lists/whitelist.txt ]; then
+            cat > lists/whitelist.txt <<EOF
+          google.com
+          youtube.com
+          microsoft.com
+          github.com
+          cloudflare.com
+          EOF
+          fi
+          
+          if [ ! -f lists/cidrwhitelist.txt ]; then
+            cat > lists/cidrwhitelist.txt <<EOF
+          1.1.1.0/24
+          8.8.8.0/24
+          9.9.9.0/24
+          EOF
+          fi
+          
+          touch blacklist_sources.txt myurl.txt forced.txt
+          
+          cat > source_patterns.txt <<EOF
+          raw.githubusercontent.com
+          \.txt$
+          sub\.
+          /sub/
+          /api/sub
+          v2ray
+          clash
+          xray
+          config
+          EOF
+
+      - name: Run parser
+        run: python RKP_Parser_Full.py
+
+      - name: Commit and push results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add sub/LTE.txt sub/WIFI.txt sub/ALL.txt
+          if git diff --cached --quiet; then
+            echo "Нет изменений для коммита"
+          else
+            git commit -m "Автообновление конфигов [skip ci]"
+            git push origin HEAD:${GITHUB_REF_NAME}
+          fi
