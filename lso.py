@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# RKP_Parser_Full.py — окончательная версия с urlsource.txt, LTE/WIFI сортировкой, ALL.txt
+# RKP_Parser_Full.py — загрузка ядер из релиза GitHub, поддержка AMD64/ARM64
 
 import asyncio
 import aiohttp
@@ -21,6 +21,7 @@ import threading
 import shutil
 import zipfile
 import ipaddress
+import platform
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse, parse_qs
@@ -58,17 +59,35 @@ CORE_STARTUP_TIMEOUT = 1.0
 CORE_KILL_DELAY = 0.2
 MAX_WORKERS = XRAY_CHECK_THREADS
 
-# ========= Ядра =========
+# ========= Ядра (загрузка из вашего релиза) =========
 CORES_DIR = Path("./cores")
 CORES_DIR.mkdir(exist_ok=True)
-XRAY_PATH = CORES_DIR / "xray"
-HYSTERIA2_PATH = CORES_DIR / "hysteria2-linux-amd64"
+
+# Определяем архитектуру
+ARCH = platform.machine()
+if ARCH == "x86_64":
+    XRAY_FILENAME = "xray"
+    HY2_FILENAME = "hysteria-linux-amd64"
+elif ARCH == "aarch64":
+    XRAY_FILENAME = "xray-arm64"
+    HY2_FILENAME = "hysteria-linux-arm64"
+else:
+    print(f"Неподдерживаемая архитектура: {ARCH}")
+    sys.exit(1)
+
+XRAY_PATH = CORES_DIR / XRAY_FILENAME
+HYSTERIA2_PATH = CORES_DIR / HY2_FILENAME
+
+# Базовый URL вашего релиза
+RELEASE_BASE = "https://github.com/linspisokobhod/RKP_PARSER_ACTION/releases/download/1"
 
 def download_core(url, dest):
     if dest.exists():
+        print(f"Ядро уже существует: {dest}")
         return True
-    print(f"Скачивание {dest.name}...")
+    print(f"Скачивание {dest.name} из {url}...")
     try:
+        # Используем requests для надёжности
         r = requests.get(url, stream=True, timeout=60)
         r.raise_for_status()
         with open(dest, "wb") as f:
@@ -77,26 +96,26 @@ def download_core(url, dest):
         dest.chmod(0o755)
         return True
     except Exception as e:
-        print(f"Ошибка: {e}")
+        print(f"Ошибка скачивания {dest.name}: {e}")
         return False
 
 def setup_cores():
+    xray_url = f"{RELEASE_BASE}/{XRAY_FILENAME}"
+    hy2_url = f"{RELEASE_BASE}/{HY2_FILENAME}"
+    
     if not XRAY_PATH.exists():
-        zip_url = "https://github.com/XTLS/Xray-core/releases/download/v25.3.6/Xray-linux-64.zip"
-        zip_path = CORES_DIR / "xray.zip"
-        if download_core(zip_url, zip_path):
-            with zipfile.ZipFile(zip_path, 'r') as zf:
-                zf.extractall(CORES_DIR)
-            os.remove(zip_path)
-            extracted = CORES_DIR / "xray"
-            if extracted.exists():
-                extracted.rename(XRAY_PATH)
+        if not download_core(xray_url, XRAY_PATH):
+            print("Не удалось скачать Xray, проверьте доступность релиза")
+            return False
     if not HYSTERIA2_PATH.exists():
-        h2_url = "https://github.com/apernet/hysteria/releases/download/v2.6.1/hysteria2-linux-amd64"
-        download_core(h2_url, HYSTERIA2_PATH)
-    return XRAY_PATH.exists() and HYSTERIA2_PATH.exists()
+        if not download_core(hy2_url, HYSTERIA2_PATH):
+            print("Не удалось скачать Hysteria2")
+            return False
+    return True
 
-setup_cores()
+if not setup_cores():
+    print("Критическая ошибка: не удалось подготовить ядра")
+    sys.exit(1)
 
 # ========= Регулярки =========
 VLESS_REGEX = re.compile(r"vless://[^\s]+", re.IGNORECASE)
@@ -264,7 +283,7 @@ def build_query(params):
         parts.append(f"{k}={safe_quote(str(v))}")
     return '&'.join(parts)
 
-# ========= Конвертеры (JSON, YAML, Base64) =========
+# ========= Конвертеры (сокращённо, но полностью рабочие) =========
 def outbound_to_vless(out):
     settings = out.get('settings', {})
     vnext = settings.get('vnext', [])
@@ -1134,7 +1153,7 @@ async def save_classified(working):
                 await f.write(line + "\n")
     await write_file(os.path.join(OUTPUT_DIR, "LTE.txt"), lte)
     await write_file(os.path.join(OUTPUT_DIR, "WIFI.txt"), wifi)
-    await write_file(os.path.join(OUTPUT_DIR, "ALL.txt"), working)   # <-- ВСЕ КОНФИГИ
+    await write_file(os.path.join(OUTPUT_DIR, "ALL.txt"), working)
     print(f"\n=== РАСПРЕДЕЛЕНИЕ ===")
     print(f"LTE (прошли whitelist/cidrwhitelist): {len(lte)}")
     print(f"WIFI (остальные): {len(wifi)}")
