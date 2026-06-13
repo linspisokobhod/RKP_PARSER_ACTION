@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# RKP_Parser_Full.py — загрузка ядер из релиза GitHub, поддержка AMD64/ARM64
+# RKP_Parser_Full.py — только TCP, многопоточная загрузка, заголовки в ALL/LTE/WIFI
 
 import asyncio
 import aiohttp
@@ -8,20 +8,14 @@ import re
 import os
 import time
 import json
-import subprocess
-import tempfile
-import requests
 import urllib.parse
 import sys
 import socket
 import random
 import base64
 import yaml
-import threading
-import shutil
-import zipfile
 import ipaddress
-import platform
+from datetime import datetime
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse, parse_qs
@@ -48,73 +42,9 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs("lists", exist_ok=True)
 
 # ========= Настройки =========
-THREADS_DOWNLOAD = 100
-TCP_CHECK_THREADS = 1000
-XRAY_CHECK_THREADS = 500
-TCP_TIMEOUT = 1000
-XRAY_TIMEOUT = 1000
-TEST_URLS = ["http://www.gstatic.com/generate_204"]
-LOCAL_PORT_START = 65535
-CORE_STARTUP_TIMEOUT = 1.0
-CORE_KILL_DELAY = 0.2
-MAX_WORKERS = 100
-# ========= Ядра (загрузка из вашего релиза) =========
-CORES_DIR = Path("./cores")
-CORES_DIR.mkdir(exist_ok=True)
-
-# Определяем архитектуру
-ARCH = platform.machine()
-if ARCH == "x86_64":
-    XRAY_FILENAME = "xray"
-    HY2_FILENAME = "hysteria-linux-amd64"
-elif ARCH == "aarch64":
-    XRAY_FILENAME = "xray-arm64"
-    HY2_FILENAME = "hysteria-linux-arm64"
-else:
-    print(f"Неподдерживаемая архитектура: {ARCH}")
-    sys.exit(1)
-
-XRAY_PATH = CORES_DIR / XRAY_FILENAME
-HYSTERIA2_PATH = CORES_DIR / HY2_FILENAME
-
-# Базовый URL вашего релиза
-RELEASE_BASE = "https://github.com/linspisokobhod/RKP_PARSER_ACTION/releases/download/1"
-
-def download_core(url, dest):
-    if dest.exists():
-        print(f"Ядро уже существует: {dest}")
-        return True
-    print(f"Скачивание {dest.name} из {url}...")
-    try:
-        # Используем requests для надёжности
-        r = requests.get(url, stream=True, timeout=60)
-        r.raise_for_status()
-        with open(dest, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                f.write(chunk)
-        dest.chmod(0o755)
-        return True
-    except Exception as e:
-        print(f"Ошибка скачивания {dest.name}: {e}")
-        return False
-
-def setup_cores():
-    xray_url = f"{RELEASE_BASE}/{XRAY_FILENAME}"
-    hy2_url = f"{RELEASE_BASE}/{HY2_FILENAME}"
-    
-    if not XRAY_PATH.exists():
-        if not download_core(xray_url, XRAY_PATH):
-            print("Не удалось скачать Xray, проверьте доступность релиза")
-            return False
-    if not HYSTERIA2_PATH.exists():
-        if not download_core(hy2_url, HYSTERIA2_PATH):
-            print("Не удалось скачать Hysteria2")
-            return False
-    return True
-
-if not setup_cores():
-    print("Критическая ошибка: не удалось подготовить ядра")
-    sys.exit(1)
+THREADS_DOWNLOAD = 1000        # количество одновременных загрузок источников
+TCP_CHECK_THREADS = 10         # потоков для TCP проверки
+TCP_TIMEOUT = 30               # таймаут TCP connect в секундах
 
 # ========= Регулярки =========
 VLESS_REGEX = re.compile(r"vless://[^\s]+", re.IGNORECASE)
@@ -282,7 +212,7 @@ def build_query(params):
         parts.append(f"{k}={safe_quote(str(v))}")
     return '&'.join(parts)
 
-# ========= Конвертеры (сокращённо, но полностью рабочие) =========
+# ========= Конвертеры (JSON, YAML, Base64) =========
 def outbound_to_vless(out):
     settings = out.get('settings', {})
     vnext = settings.get('vnext', [])
@@ -534,77 +464,64 @@ def decode_base64_content(content):
     except:
         return None
 
-# ========= Загрузка HTTP источников =========
-async def fetch(session, url, sem):
-    async with sem:
-        try:
-            async with session.get(url, timeout=30, ssl=False) as resp:
-                if resp.status == 200:
-                    return await resp.text()
-        except: pass
+# ========= Многопоточная загрузка источников =========
+async def fetch(session, url):
+    try:
+        async with session.get(url, timeout=30, ssl=False) as resp:
+            if resp.status == 200:
+                return await resp.text()
+    except:
+        pass
     return None
 
 async def process_url(session, url, sem, stats):
-    content = await fetch(session, url, sem)
-    async with stats['lock']:
-        stats['processed'] += 1
-    if not content:
-        log_source_error(url)
-        await update_progress(stats)
-        return
-    vless = VLESS_REGEX.findall(content)
-    trojan = TROJAN_REGEX.findall(content)
-    vmess = VMESS_REGEX.findall(content)
-    hy2 = HY2_REGEX.findall(content)
-    if not (vless or trojan or vmess or hy2):
-        json_urls = convert_json_to_urls(content)
-        for u in json_urls:
-            if u.startswith("vless://"): vless.append(u)
-            elif u.startswith("trojan://"): trojan.append(u)
-            elif u.startswith("vmess://"): vmess.append(u)
-            elif u.startswith(("hysteria2://","hy2://")): hy2.append(u)
-        yaml_urls = convert_yaml_to_urls(content)
-        for u in yaml_urls:
-            if u.startswith("vless://"): vless.append(u)
-            elif u.startswith("trojan://"): trojan.append(u)
-            elif u.startswith("vmess://"): vmess.append(u)
-            elif u.startswith(("hysteria2://","hy2://")): hy2.append(u)
-        b64 = decode_base64_content(content)
-        if b64:
-            _, matches = b64
-            for m in matches:
-                if m.startswith("vless://"): vless.append(m)
-                elif m.startswith("trojan://"): trojan.append(m)
-                elif m.startswith("vmess://"): vmess.append(m)
-                elif m.startswith(("hysteria2://","hy2://")): hy2.append(m)
-    total = len(vless)+len(trojan)+len(vmess)+len(hy2)
-    if total > 0:
+    async with sem:
+        content = await fetch(session, url)
         async with stats['lock']:
-            stats['vless'] += len(vless)
-            stats['trojan'] += len(trojan)
-            stats['vmess'] += len(vmess)
-            stats['hy2'] += len(hy2)
-        async with stats['file_lock']:
-            async with aiofiles.open(OUTPUT_FILE, "a", encoding="utf-8") as f:
-                for line in vless+trojan+vmess+hy2:
-                    await f.write(line + "\n")
-    await update_progress(stats)
-
-async def update_progress(stats):
-    async with stats['lock']:
-        p = stats['processed']; t = stats['total_sources']
-        v = stats['vless']; tr = stats['trojan']; vm = stats['vmess']; h = stats['hy2']
-        bar_len = 40
-        prog = p/t if t>0 else 0
-        filled = int(bar_len*prog)
-        bar = '█'*filled + '░'*(bar_len-filled)
-        percent = round(prog*100)
-        sys.stdout.write(f"\rЗагружено: |{bar}| {percent}% {p}/{t} | Конфигов: {v+tr+vm+h} (VLESS:{v} TROJAN:{tr} VMESS:{vm} HY2:{h})")
-        sys.stdout.flush()
+            stats['processed'] += 1
+        if not content:
+            log_source_error(url)
+            return
+        vless = VLESS_REGEX.findall(content)
+        trojan = TROJAN_REGEX.findall(content)
+        vmess = VMESS_REGEX.findall(content)
+        hy2 = HY2_REGEX.findall(content)
+        if not (vless or trojan or vmess or hy2):
+            json_urls = convert_json_to_urls(content)
+            for u in json_urls:
+                if u.startswith("vless://"): vless.append(u)
+                elif u.startswith("trojan://"): trojan.append(u)
+                elif u.startswith("vmess://"): vmess.append(u)
+                elif u.startswith(("hysteria2://","hy2://")): hy2.append(u)
+            yaml_urls = convert_yaml_to_urls(content)
+            for u in yaml_urls:
+                if u.startswith("vless://"): vless.append(u)
+                elif u.startswith("trojan://"): trojan.append(u)
+                elif u.startswith("vmess://"): vmess.append(u)
+                elif u.startswith(("hysteria2://","hy2://")): hy2.append(u)
+            b64 = decode_base64_content(content)
+            if b64:
+                _, matches = b64
+                for m in matches:
+                    if m.startswith("vless://"): vless.append(m)
+                    elif m.startswith("trojan://"): trojan.append(m)
+                    elif m.startswith("vmess://"): vmess.append(m)
+                    elif m.startswith(("hysteria2://","hy2://")): hy2.append(m)
+        total = len(vless)+len(trojan)+len(vmess)+len(hy2)
+        if total > 0:
+            async with stats['lock']:
+                stats['vless'] += len(vless)
+                stats['trojan'] += len(trojan)
+                stats['vmess'] += len(vmess)
+                stats['hy2'] += len(hy2)
+            async with stats['file_lock']:
+                async with aiofiles.open(OUTPUT_FILE, "a", encoding="utf-8") as f:
+                    for line in vless+trojan+vmess+hy2:
+                        await f.write(line + "\n")
 
 async def download_http_sources(urls):
     filtered = [u for u in urls if not is_blacklisted(u)]
-    print(f"\nСкачиваю {len(filtered)} HTTP источников...")
+    print(f"\nСкачиваю {len(filtered)} HTTP источников (потоков: {THREADS_DOWNLOAD})...")
     sem = asyncio.Semaphore(THREADS_DOWNLOAD)
     stats = {
         'processed':0, 'total_sources':len(filtered),
@@ -614,7 +531,7 @@ async def download_http_sources(urls):
     async with aiohttp.ClientSession() as session:
         tasks = [process_url(session, url, sem, stats) for url in filtered]
         await asyncio.gather(*tasks)
-    print()
+    print(f"\nОбработано {stats['processed']} источников, найдено конфигов: {stats['vless']+stats['trojan']+stats['vmess']+stats['hy2']}")
 
 async def add_my_configs():
     if not os.path.exists(MYURL_FILE): return
@@ -741,7 +658,7 @@ async def fix_all_vless_params(configs):
     print(f"Исправлено: {fixed}")
     return new
 
-# ========= TCP предфильтрация (VLESS и VMess) =========
+# ========= TCP проверка (многопоточная) =========
 def tcp_check(url):
     try:
         if url.startswith("vless://"):
@@ -769,366 +686,33 @@ def tcp_check(url):
         return False
 
 async def tcp_prefilter(configs):
-    print("\n=== TCP ПРЕДФИЛЬТРАЦИЯ (VLESS+VMess) ===")
+    print(f"\n=== TCP ПРОВЕРКА (VLESS+VMess, потоков: {TCP_CHECK_THREADS}, таймаут: {TCP_TIMEOUT}с) ===")
     online = [u for u in configs if not (u.startswith("vless://") or u.startswith("vmess://"))]
     to_check = [u for u in configs if u.startswith("vless://") or u.startswith("vmess://")]
+    if not to_check:
+        print("Нет конфигов VLESS/VMess для проверки")
+        return online
     start = time.time()
-    with ThreadPoolExecutor(max_workers=TCP_CHECK_THREADS) as ex:
-        futures = {ex.submit(tcp_check, u): u for u in to_check}
-        proc = 0
-        for f in as_completed(futures):
-            proc += 1
-            if f.result():
-                online.append(futures[f])
-            if proc % 10 == 0:
-                sys.stdout.write(f"\r[TCP] {proc}/{len(to_check)} проверено")
+    with ThreadPoolExecutor(max_workers=TCP_CHECK_THREADS) as executor:
+        futures = {executor.submit(tcp_check, url): url for url in to_check}
+        processed = 0
+        for future in as_completed(futures):
+            processed += 1
+            if future.result():
+                online.append(futures[future])
+            if processed % max(1, len(to_check)//10) == 0:
+                sys.stdout.write(f"\r[TCP] {processed}/{len(to_check)} проверено")
                 sys.stdout.flush()
-    sys.stdout.write('\n')
+    sys.stdout.write(f"\r[TCP] {len(to_check)}/{len(to_check)} проверено\n")
     online = list(set(online))
     elapsed = time.time() - start
-    print(f"\nПредфильтрация: {len(online)}/{len(configs)} за {elapsed:.1f}s")
+    print(f"\nTCP проверка завершена: {len(online)}/{len(configs)} за {elapsed:.1f}s")
     async with aiofiles.open(TCP_FILE, "w", encoding="utf-8") as f:
         for url in online:
             await f.write(url + "\n")
     return online
 
-# ========= Полная проверка Xray/Hysteria2 =========
-def is_port_in_use(p):
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(0.1)
-            return s.connect_ex(('127.0.0.1', p)) == 0
-    except:
-        return False
-
-def wait_core(port, max_wait):
-    start = time.time()
-    while time.time() - start < max_wait:
-        if is_port_in_use(port):
-            return True
-        time.sleep(0.1)
-    return False
-
-def run_xray(cfg):
-    return subprocess.Popen([str(XRAY_PATH), "run", "-c", cfg],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-def kill_proc(p):
-    if not p: return
-    try:
-        p.terminate()
-        time.sleep(0.3)
-        p.kill()
-    except: pass
-
-def parse_vless_full(u):
-    try:
-        u = clean_url(u)
-        if not u.startswith("vless://"): return None
-        main = u; tag = "vless"
-        if '#' in u:
-            main, tag = u.split('#',1)
-            tag = urllib.parse.unquote(tag).strip()
-        m = re.search(r'vless://([^@]+)@([^:]+):(\d+)', main)
-        if not m: return None
-        uuid, addr, port = m.group(1), m.group(2), int(m.group(3))
-        params = {}
-        if '?' in main:
-            params = parse_qs(main.split('?',1)[1])
-        def get(k, defv=""): return params.get(k,[defv])[0].strip() or defv
-        net = get("type","tcp").lower()
-        if net not in ("tcp","ws","grpc","h2","kcp","quic","httpupgrade","xhttp"): net = "tcp"
-        sec = get("security","none").lower()
-        if sec not in ("tls","reality","none"): sec = "none"
-        pbk = get("pbk","")
-        if pbk and sec == "tls": sec = "reality"
-        return {
-            "protocol":"vless","uuid":uuid,"address":addr,"port":port,"type":net,"security":sec,
-            "path":urllib.parse.unquote(get("path","")),"host":get("host",""),"sni":get("sni",""),
-            "fp":get("fp","chrome"),"alpn":get("alpn",""),"serviceName":get("serviceName",""),
-            "flow":get("flow",""),"pbk":pbk,"sid":get("sid",""),"allowInsecure":get("allowInsecure","true").lower() in ("true","1","yes"),
-            "tag":tag
-        }
-    except: return None
-
-def parse_trojan_full(u):
-    try:
-        u = u.strip().replace('\ufeff','').replace('\u200b','')
-        if not u.startswith("trojan://"): return None
-        prot = u.replace('%23','___HASH___')
-        if '#' in prot:
-            clean, tag = prot.split('#',1)
-            tag = urllib.parse.unquote(tag).strip()
-        else:
-            clean = prot; tag = "trojan"
-        parsed = urlparse(clean)
-        pwd = (parsed.username or "trojan").replace('___HASH___','#')
-        if not parsed.hostname or not parsed.port: return None
-        qs = parse_qs(parsed.query)
-        def get(k, d=""): return qs.get(k,[d])[0].strip() or d
-        net = get("type","tcp").lower()
-        if net not in ("tcp","ws","grpc","h2","kcp","quic","httpupgrade","xhttp"): net = "tcp"
-        sec = get("security","tls").lower()
-        if sec not in ("tls","none"): sec = "tls"
-        return {
-            "protocol":"trojan","password":pwd,"address":parsed.hostname,"port":int(parsed.port),
-            "type":net,"security":sec,"path":urllib.parse.unquote(get("path","")),"host":get("host",""),
-            "sni":get("sni",""),"fp":get("fp","chrome"),"alpn":get("alpn",""),"serviceName":get("serviceName",""),
-            "allowInsecure":get("allowInsecure","true").lower() in ("true","1","yes"),"tag":tag
-        }
-    except: return None
-
-def parse_vmess_full(u):
-    try:
-        if not u.startswith("vmess://"): return None
-        b64 = u[8:].split('#')[0]
-        obj = json.loads(base64.b64decode(b64).decode())
-        addr = obj.get('add'); port = int(obj.get('port',0)); uuid = obj.get('id')
-        if not addr or not port or not uuid: return None
-        return {
-            "protocol":"vmess","uuid":uuid,"address":addr,"port":port,
-            "type":obj.get('net','tcp'),"security":"tls" if obj.get('tls')=='tls' else "none",
-            "path":obj.get('path',''),"host":obj.get('host',''),"sni":obj.get('sni',''),
-            "fp":obj.get('fp','chrome'),"alpn":obj.get('alpn',''),"serviceName":"",
-            "allowInsecure":obj.get('allowInsecure','0')=='1',"tag":obj.get('ps','vmess'),
-            "alterId":obj.get('aid',0),"encryption":obj.get('scy','auto')
-        }
-    except: return None
-
-def build_stream(conf):
-    net = conf.get("type","tcp").lower()
-    sec = conf.get("security","none").lower()
-    stream = {"network":net, "security":sec}
-    if sec == "tls":
-        tls = {"serverName":conf.get("sni") or conf.get("host") or "",
-               "allowInsecure":conf.get("allowInsecure",True),
-               "fingerprint":conf.get("fp","chrome")}
-        alpn = [a.strip() for a in conf.get("alpn","").split(",") if a.strip()] if conf.get("alpn") else None
-        if alpn: tls["alpn"] = alpn
-        stream["tlsSettings"] = tls
-    elif sec == "reality":
-        pbk = conf.get("pbk","")
-        if not pbk: return None
-        reality = {"publicKey":pbk, "shortId":conf.get("sid",""),
-                   "serverName":conf.get("sni") or conf.get("host") or "",
-                   "fingerprint":conf.get("fp","chrome"), "spiderX":"/"}
-        alpn = [a.strip() for a in conf.get("alpn","").split(",") if a.strip()] if conf.get("alpn") else None
-        if alpn: reality["alpn"] = alpn
-        stream["realitySettings"] = reality
-    if net in ("ws","websocket"):
-        stream["wsSettings"] = {"path":conf.get("path","/"), "headers":{"Host":conf.get("host","")}}
-    elif net == "grpc":
-        stream["grpcSettings"] = {"serviceName":conf.get("serviceName","")}
-    elif net in ("xhttp","splithttp"):
-        stream["xhttpSettings"] = {"path":conf.get("path","/"), "host":conf.get("host","")}
-    return stream
-
-def get_outbound(proxy_url, tag):
-    if proxy_url.startswith("vless://"): conf = parse_vless_full(proxy_url)
-    elif proxy_url.startswith("trojan://"): conf = parse_trojan_full(proxy_url)
-    elif proxy_url.startswith("vmess://"): conf = parse_vmess_full(proxy_url)
-    else: return None
-    if not conf or not conf.get("address") or not (1 <= conf.get("port",0) <= 65535): return None
-    out = {"tag":tag}
-    if conf["protocol"] == "vless":
-        out["protocol"] = "vless"
-        out["settings"] = {"vnext":[{"address":conf["address"],"port":conf["port"],
-                                     "users":[{"id":conf["uuid"],"encryption":"none","flow":conf.get("flow","")}]}]}
-        stream = build_stream(conf)
-        if stream: out["streamSettings"] = stream
-    elif conf["protocol"] == "trojan":
-        out["protocol"] = "trojan"
-        out["settings"] = {"servers":[{"address":conf["address"],"port":conf["port"],"password":conf["password"]}]}
-        stream = build_stream(conf)
-        if stream: out["streamSettings"] = stream
-    elif conf["protocol"] == "vmess":
-        out["protocol"] = "vmess"
-        out["settings"] = {"vnext":[{"address":conf["address"],"port":conf["port"],
-                                     "users":[{"id":conf["uuid"],"security":conf.get("encryption","auto"),"alterId":conf.get("alterId",0)}]}]}
-        stream = build_stream(conf)
-        if stream: out["streamSettings"] = stream
-    else: return None
-    return out
-
-def create_config(proxy_url, local_port, work_dir):
-    tag_out = f"out_{local_port}"
-    out = get_outbound(proxy_url, tag_out)
-    if not out: return None, "outbound error"
-    inbound = {"port":local_port,"listen":"127.0.0.1","protocol":"socks","tag":f"in_{local_port}","settings":{"udp":False}}
-    routing = {"domainStrategy":"AsIs","rules":[{"type":"field","inboundTag":[f"in_{local_port}"],"outboundTag":tag_out}]}
-    cfg = {"log":{"loglevel":"warning"},"inbounds":[inbound],"outbounds":[out],"routing":routing}
-    path = os.path.join(work_dir, f"config_{local_port}.json")
-    with open(path, "w") as f:
-        json.dump(cfg, f, indent=2)
-    return path, None
-
-def check_http(local_port, timeout):
-    for url in TEST_URLS:
-        proxies = {'http':f'socks5://127.0.0.1:{local_port}','https':f'socks5://127.0.0.1:{local_port}'}
-        try:
-            start = time.time()
-            r = requests.get(url, proxies=proxies, timeout=timeout, verify=False)
-            if r.status_code < 400:
-                return round((time.time()-start)*1000), None
-        except: continue
-    return False, "No response"
-
-def check_xray(proxy_url, port, work_dir):
-    cfg_path, err = create_config(proxy_url, port, work_dir)
-    if not cfg_path: return None, err
-    proc = run_xray(cfg_path)
-    if not proc: return None, "Xray start fail"
-    if not wait_core(port, CORE_STARTUP_TIMEOUT):
-        kill_proc(proc); return None, "Xray not ready"
-    time.sleep(0.5)
-    ping, err = check_http(port, XRAY_TIMEOUT)
-    kill_proc(proc)
-    time.sleep(0.2)
-    try: os.remove(cfg_path)
-    except: pass
-    if ping: return proxy_url, ping
-    return None, err
-
-def check_hysteria2(proxy_url, tmp_dir):
-    try:
-        parsed = urlparse(proxy_url)
-        if parsed.scheme not in ('hysteria2','hy2'): return None, "bad scheme"
-        netloc = parsed.netloc
-        auth = None
-        if '@' in netloc:
-            auth_part, netloc = netloc.split('@',1)
-            if ':' in auth_part:
-                u,p = auth_part.split(':',1)
-                auth = {'username':urllib.parse.unquote(u), 'password':urllib.parse.unquote(p)}
-            else:
-                auth = urllib.parse.unquote(auth_part)
-        if ':' in netloc:
-            host, port_str = netloc.split(':',1)
-            port = int(port_str)
-        else:
-            host, port = netloc, 443
-        params = {k.lower():v[0] for k,v in parse_qs(parsed.query).items()}
-        if isinstance(auth,str) and '%' in auth: auth = urllib.parse.unquote(auth)
-        insecure = params.get('insecure','true').lower() in ('true','1','yes')
-        socks_port = random.randint(20000,60000)
-        cfg = {
-            'server':f"{host}:{port}",
-            'auth':auth if auth is not None else "auto",
-            'tls':{'sni':params.get('sni',host), 'insecure':insecure},
-            'socks5':{'listen':f'127.0.0.1:{socks_port}'},
-            'quic':{'initStreamReceiveWindow':8388608,'maxStreamReceiveWindow':8388608,
-                    'initConnReceiveWindow':20971520,'maxConnReceiveWindow':20971520,
-                    'maxIdleTimeout':'30s','maxIncomingStreams':1024}
-        }
-        alpn = params.get('alpn','h3')
-        cfg['tls']['alpn'] = [a.strip() for a in alpn.split(',')]
-        obfs_pass = params.get('obfs-password')
-        if obfs_pass:
-            cfg['transport'] = {'udp':{'obfs':{'type':'salamander','password':obfs_pass}}}
-        cfg_file = os.path.join(tmp_dir, f"hy2_{random.randint(10000,99999)}.yaml")
-        with open(cfg_file, 'w') as f:
-            yaml.dump(cfg, f, default_flow_style=False)
-        proc = subprocess.Popen([str(HYSTERIA2_PATH), 'client', '-c', cfg_file],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(5)
-        if proc.poll() is not None:
-            proc = subprocess.Popen([str(HYSTERIA2_PATH), '-c', cfg_file],
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(5)
-            if proc.poll() is not None:
-                return None, "hysteria2 client fail"
-        port_ready = False
-        for _ in range(40):
-            time.sleep(0.3)
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.5)
-            if s.connect_ex(('127.0.0.1', socks_port)) == 0:
-                s.close(); port_ready = True; break
-            s.close()
-        if not port_ready:
-            return None, f"socks port {socks_port} not open"
-        for url in TEST_URLS:
-            proxies = {'http':f'socks5://127.0.0.1:{socks_port}','https':f'socks5://127.0.0.1:{socks_port}'}
-            try:
-                start = time.time()
-                r = requests.get(url, proxies=proxies, timeout=XRAY_TIMEOUT, verify=False)
-                if r.status_code < 400:
-                    ping = int((time.time()-start)*1000)
-                    return proxy_url, ping
-            except: continue
-        return None, "no test url passed"
-    except Exception as e:
-        return None, str(e)
-    finally:
-        if 'proc' in locals() and proc:
-            proc.terminate(); time.sleep(0.5); proc.kill()
-        try: os.remove(cfg_file)
-        except: pass
-
-port_lock = threading.Lock()
-current_port = LOCAL_PORT_START
-
-def check_one(proxy_url):
-    global current_port
-    with port_lock:
-        port = current_port
-        current_port += 1
-        if current_port > 60000: current_port = LOCAL_PORT_START
-    tmp = tempfile.mkdtemp(prefix="check_")
-    try:
-        if proxy_url.startswith(("hysteria2://","hy2://")):
-            res = check_hysteria2(proxy_url, tmp)
-        else:
-            res = check_xray(proxy_url, port, tmp)
-        if res and res[0]:
-            return res[0]
-        return None
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-async def check_all(configs):
-    print(f"\n=== ПОЛНАЯ ПРОВЕРКА (Xray + Hysteria2) ===")
-    if not configs: return []
-    total = len(configs)
-    print(f"Проверяем {total} конфигов (таймаут {XRAY_TIMEOUT}с, потоков {MAX_WORKERS})")
-    start = time.time()
-    stats_lock = threading.Lock()
-    checked = 0; alive = 0; alive_proto = {"VLESS":0,"TROJAN":0,"VMESS":0,"HY2":0}
-    stop = threading.Event()
-    def printer():
-        while not stop.is_set():
-            time.sleep(1)
-            with stats_lock:
-                c = checked; a = alive
-                elapsed = time.time()-start
-                speed = c/elapsed if elapsed>0 else 0
-                sys.stdout.write(f"\r[CHECK] {c}/{total} | Работает: {a} | VLESS:{alive_proto['VLESS']} TROJAN:{alive_proto['TROJAN']} VMESS:{alive_proto['VMESS']} HY2:{alive_proto['HY2']} | {speed:.1f}/сек    ")
-                sys.stdout.flush()
-        sys.stdout.write('\n')
-    t = threading.Thread(target=printer, daemon=True); t.start()
-    working = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = {ex.submit(check_one, url): url for url in configs}
-        for f in as_completed(futures):
-            with stats_lock:
-                checked += 1
-            try:
-                w = f.result()
-                if w:
-                    working.append(w)
-                    with stats_lock:
-                        alive += 1
-                        if w.startswith("vless://"): alive_proto["VLESS"] += 1
-                        elif w.startswith("trojan://"): alive_proto["TROJAN"] += 1
-                        elif w.startswith("vmess://"): alive_proto["VMESS"] += 1
-                        elif w.startswith(("hysteria2://","hy2://")): alive_proto["HY2"] += 1
-            except: pass
-    stop.set(); t.join(timeout=2)
-    elapsed = time.time()-start
-    print(f"\nПроверка завершена: {len(working)}/{total} за {elapsed:.1f}с")
-    return working
-
-# ========= Финальное переименование и сохранение =========
+# ========= Переименование и сохранение с заголовками =========
 def rename_config(url):
     sni = extract_sni(url)
     proto, net = get_proto_net(url)
@@ -1138,6 +722,30 @@ def rename_config(url):
     return f"{base}#{enc}"
 
 async def save_classified(working):
+    update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    header_all = f"""#profile-title: #LSO-#LinSpisokObhod
+#profile-update-interval: 1
+#support-url: https://t.me/LinSpisokObhod
+#announce: LinSpisokObhod подписка all.txt. Здесь находится конфиги WIFI.txt и LTE.txt Время: {update_time}
+#subscription-userinfo: upload=0; download=0; total=0; expire=0
+
+"""
+    header_lte = f"""#profile-title: #LSO-#LinSpisokObhod
+#profile-update-interval: 1
+#support-url: https://t.me/LinSpisokObhod
+#announce: LinSpisokObhod подписка LTE.txt. Здесь находится конфиги которые может подойдут для повседневного использования. Время: {update_time}
+#subscription-userinfo: upload=0; download=0; total=0; expire=0
+
+"""
+    header_wifi = f"""#profile-title: #LSO-#LinSpisokObhod
+#profile-update-interval: 1
+#support-url: https://t.me/LinSpisokObhod
+#announce: LinSpisokObhod подписка WIFI.txt. Здесь находится конфиги которые может подойдут для вайфай но может и для мобильного интернета Время: {update_time}
+#subscription-userinfo: upload=0; download=0; total=0; expire=0
+
+"""
+    
     lte = []
     wifi = []
     for url in working:
@@ -1146,13 +754,17 @@ async def save_classified(working):
             lte.append(url)
         else:
             wifi.append(url)
-    async def write_file(p, data):
-        async with aiofiles.open(p, "w", encoding="utf-8") as f:
+    
+    async def write_file(path, header, data):
+        async with aiofiles.open(path, "w", encoding="utf-8") as f:
+            await f.write(header)
             for line in data:
                 await f.write(line + "\n")
-    await write_file(os.path.join(OUTPUT_DIR, "LTE.txt"), lte)
-    await write_file(os.path.join(OUTPUT_DIR, "WIFI.txt"), wifi)
-    await write_file(os.path.join(OUTPUT_DIR, "ALL.txt"), working)
+    
+    await write_file(os.path.join(OUTPUT_DIR, "ALL.txt"), header_all, working)
+    await write_file(os.path.join(OUTPUT_DIR, "LTE.txt"), header_lte, lte)
+    await write_file(os.path.join(OUTPUT_DIR, "WIFI.txt"), header_wifi, wifi)
+    
     print(f"\n=== РАСПРЕДЕЛЕНИЕ ===")
     print(f"LTE (прошли whitelist/cidrwhitelist): {len(lte)}")
     print(f"WIFI (остальные): {len(wifi)}")
@@ -1161,7 +773,7 @@ async def save_classified(working):
 
 # ========= Основной цикл =========
 async def main():
-    print("=== СТАРТ ПАРСЕРА ===")
+    print("=== СТАРТ ПАРСЕРА (только TCP, многопоточная загрузка) ===")
     if os.path.exists(OUTPUT_FILE): os.remove(OUTPUT_FILE)
     if os.path.exists(WORK_FILE):
         with open(WORK_FILE) as f:
@@ -1193,10 +805,7 @@ async def main():
     online = await tcp_prefilter(all_cfg)
     if not online: return
 
-    working = await check_all(online)
-    if not working: return
-
-    renamed = [rename_config(u) for u in working]
+    renamed = [rename_config(u) for u in online]
     async with aiofiles.open(NAMED_FILE, "w", encoding="utf-8") as f:
         for u in renamed:
             await f.write(u + "\n")
