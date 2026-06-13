@@ -49,8 +49,8 @@ os.makedirs("lists", exist_ok=True)
 
 # ========= Настройки =========
 THREADS_DOWNLOAD = 100
-TCP_CHECK_THREADS = 10
-XRAY_CHECK_THREADS = 5
+TCP_CHECK_THREADS = 1000
+XRAY_CHECK_THREADS = 500
 TCP_TIMEOUT = 1000
 XRAY_TIMEOUT = 1000
 TEST_URLS = ["http://www.gstatic.com/generate_204"]
