@@ -1,2 +1,6 @@
-https://github.com/AvenCores/goida-vpn-configs/raw/refs/heads/main/githubmirror/1.txt
-https://github.com/AvenCores/goida-vpn-configs/raw/refs/heads/main/githubmirror/26.txt
+https://mifa.world/vless
+https://mifa.world/trojan
+https://mifa.world/ss
+https://mifa.world/vmess
+https://mifa.world/other
+https://mifa.world/hysteria
