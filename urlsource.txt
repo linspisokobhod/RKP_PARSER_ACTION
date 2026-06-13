@@ -11,3 +11,5 @@ https://internet-tenshi.kangel.tech/2
 https://raw.githubusercontent.com/ksenkovsolo/HardVPN-bypass-WhiteLists-/refs/heads/main/vpn-lte/WHITELIST-ALL.txt
 https://rostunnel.vercel.app/mega.txt
 https://github.com/AvenCores/goida-vpn-configs/raw/refs/heads/main/githubmirror/1.txt
+https://v2hub.link/sub/h8vgRjBG4TgbBZIzBDs8cHnMXiVbpIzC1n1A_scc0uI
+https://github.com/AvenCores/goida-vpn-configs/raw/refs/heads/main/githubmirror/26.txt
