@@ -4,3 +4,9 @@ https://mifa.world/ss
 https://mifa.world/vmess
 https://mifa.world/other
 https://mifa.world/hysteria
+https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/separated-protocols/hysteria2_configs.txt
+https://gist.github.com/DestroyST6767/50af50221ca1858ba2084efc0f524fbc.txt
+https://github.com/ksenkovsolo/HardVPN-bypass-WhiteLists-/blob/main/vpn-lte/WHITELIST-ALL.txt
+https://github.com/igareck/vpn-configs-for-russia/blob/main/Vless-Reality-White-Lists-Rus-Mobile.txt
+https://github.com/igareck/vpn-configs-for-russia/blob/main/Vless-Reality-White-Lists-Rus-Mobile-2.txt
+https://connliberty.com/connection/subs/d8849138-1a7d-4b77-b380-89ef96d59a5c
