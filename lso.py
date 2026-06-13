@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# RKP_Parser_Full.py — полная версия с urlsource.txt, LTE/WIFI/ALL, base64, push в репозиторий
+# RKP_Parser_Full.py — окончательная версия с urlsource.txt, LTE/WIFI сортировкой, ALL.txt
 
 import asyncio
 import aiohttp
@@ -1110,7 +1110,7 @@ async def check_all(configs):
     print(f"\nПроверка завершена: {len(working)}/{total} за {elapsed:.1f}с")
     return working
 
-# ========= Финальное переименование и сортировка =========
+# ========= Финальное переименование и сохранение =========
 def rename_config(url):
     sni = extract_sni(url)
     proto, net = get_proto_net(url)
@@ -1128,33 +1128,18 @@ async def save_classified(working):
             lte.append(url)
         else:
             wifi.append(url)
-    
     async def write_file(p, data):
         async with aiofiles.open(p, "w", encoding="utf-8") as f:
             for line in data:
                 await f.write(line + "\n")
-    
     await write_file(os.path.join(OUTPUT_DIR, "LTE.txt"), lte)
     await write_file(os.path.join(OUTPUT_DIR, "WIFI.txt"), wifi)
-    
-    # Все конфиги вместе
-    all_configs = lte + wifi
-    await write_file(os.path.join(OUTPUT_DIR, "ALL.txt"), all_configs)
-    
-    # Base64 подписка (опционально)
-    if all_configs:
-        all_text = "\n".join(all_configs)
-        all_b64 = base64.b64encode(all_text.encode()).decode()
-        async with aiofiles.open(os.path.join(OUTPUT_DIR, "ALL_base64.txt"), "w", encoding="utf-8") as f:
-            await f.write(all_b64)
-    
+    await write_file(os.path.join(OUTPUT_DIR, "ALL.txt"), working)   # <-- ВСЕ КОНФИГИ
     print(f"\n=== РАСПРЕДЕЛЕНИЕ ===")
-    print(f"LTE: {len(lte)}")
-    print(f"WIFI: {len(wifi)}")
-    print(f"Всего рабочих конфигов: {len(all_configs)}")
+    print(f"LTE (прошли whitelist/cidrwhitelist): {len(lte)}")
+    print(f"WIFI (остальные): {len(wifi)}")
+    print(f"Всего рабочих: {len(working)}")
     print(f"Сохранено в {OUTPUT_DIR}/LTE.txt, {OUTPUT_DIR}/WIFI.txt, {OUTPUT_DIR}/ALL.txt")
-    if all_configs:
-        print(f"Base64 подписка: {OUTPUT_DIR}/ALL_base64.txt")
 
 # ========= Основной цикл =========
 async def main():
